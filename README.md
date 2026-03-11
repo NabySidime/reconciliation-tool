@@ -183,8 +183,3 @@ Les résultats s'affichent dans l'interface :
 ### 6. Exporter
 
 Cliquez sur **"Exporter vers Excel"** pour sauvegarder les résultats détaillés.
-
-## Auteur
-
-Créé par Naby Sidimé (https://github.com/NabySidime)
-LinkedIn : https://www.linkedin.com/in/naby-sidimé-7688b0352

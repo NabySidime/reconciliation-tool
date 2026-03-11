@@ -1,4 +1,4 @@
-# Point d'entrée 21112001
+# Point d'entrée 211101
 import sys
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
