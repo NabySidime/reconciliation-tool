@@ -1,8 +1,12 @@
 # Point d'entrée 211101
 import sys
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
 from gui.main_window import MainWindow
+from PySide6.QtWidgets import (
+    QProgressBar,
+    QApplication,
+    QHBoxLayout,
+)
+from PySide6.QtCore import Qt, Signal, QThread, QObject
 
 def main():
     # Activer le support DPI haute résolution
@@ -11,7 +15,7 @@ def main():
     )
     
     app = QApplication(sys.argv)
-    app.setApplicationName("Réconciliation OM/PayCard")
+    app.setApplicationName("Réconciliation")
     app.setApplicationVersion("1.0.0")
     
     window = MainWindow()

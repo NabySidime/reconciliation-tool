@@ -4,10 +4,11 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QFileDialog, 
     QTableWidget, QTableWidgetItem, QGroupBox, 
     QMessageBox, QSplitter, QFrame,
-    QHeaderView, QStatusBar, QGridLayout
+    QHeaderView, QStatusBar, QGridLayout,
+    QDialog  # AJOUTÉ
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, Signal, QObject, QThread
+from PySide6.QtGui import QFont, QCursor
 from pathlib import Path
 
 from core.reconciliator import Reconciliator, ReconciliationResult
@@ -15,7 +16,7 @@ from utils.excel_handler import ExcelHandler
 
 class DropArea(QFrame):
     """Zone de dépôt de fichiers"""
-    file_loaded = Signal(str)  # Signal émis quand un fichier est chargé
+    file_loaded = Signal(str)
     
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -35,7 +36,7 @@ class DropArea(QFrame):
         """)
         
         layout = QVBoxLayout(self)
-        self.label = QLabel(f"📁 {title}\n\nGlissez-déposez un fichier Excel\nou cliquez pour parcourir")
+        self.label = QLabel(f"📁 {title}\n\nGlissez-déposez un fichier\nExcel ou CSV\nou cliquez pour parcourir")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet("color: #4a5568; font-size: 12px;")
         layout.addWidget(self.label)
@@ -62,23 +63,50 @@ class DropArea(QFrame):
         urls = event.mimeData().urls()
         if urls:
             file_path = urls[0].toLocalFile()
-            if file_path.endswith(('.xlsx', '.xls')):
+            if self.is_valid_file(file_path):
                 self.file_path = file_path
                 self.label.setText(f"✓ {Path(file_path).name}")
                 self.label.setStyleSheet("color: #38a169; font-weight: bold;")
-                # Émettre le signal pour charger le fichier
                 self.file_loaded.emit(file_path)
             else:
-                self.label.setText("✗ Format non valide (Excel requis)")
+                self.label.setText("✗ Format non valide\n(Excel ou CSV requis)")
                 self.label.setStyleSheet("color: #e53e3e;")
+    
+    def is_valid_file(self, file_path):
+        """Vérifie si le fichier est au format accepté"""
+        valid_extensions = ('.xlsx', '.xls', '.csv')
+        return file_path.lower().endswith(valid_extensions)
+
+class ReconciliationWorker(QObject):
+    """Worker thread pour la réconciliation sans bloquer l'UI"""
+    finished = Signal(object)
+    error = Signal(str)
+    
+    def __init__(self, reconciliator):
+        super().__init__()
+        self.reconciliator = reconciliator
+    
+    def run(self):
+        try:
+            success, result = self.reconciliator.reconcile()
+            
+            if success:
+                self.finished.emit(result)
+            else:
+                self.error.emit(str(result))
+        except Exception as e:
+            self.error.emit(str(e))
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.reconciliator = Reconciliator()
         self.current_result = None
+        self.worker = None
+        self.thread = None
+        self.comparison_keys = []  # Liste des paires (col_fichier1, col_fichier2)
         
-        self.setWindowTitle("Réconciliation de Fichiers Excel")
+        self.setWindowTitle("Réconciliation de Fichiers Excel/CSV")
         self.setMinimumSize(1400, 900)
         
         self.setup_ui()
@@ -100,68 +128,117 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(header)
         
         # Section fichiers
-        files_group = QGroupBox("📂 Chargement des Fichiers")
+        files_group = QGroupBox("📂 Chargement des Fichiers (Excel ou CSV)")
         files_layout = QHBoxLayout(files_group)
         
         self.file1_drop = DropArea("Fichier Source 1")
-        self.file1_drop.file_loaded.connect(self.load_file1_from_drop)  # Connecter signal
+        self.file1_drop.file_loaded.connect(self.load_file1_from_drop)
         self.file1_drop.mousePressEvent = lambda e: self.select_file(1)
         files_layout.addWidget(self.file1_drop)
         
         self.file2_drop = DropArea("Fichier Source 2")
-        self.file2_drop.file_loaded.connect(self.load_file2_from_drop)  # Connecter signal
+        self.file2_drop.file_loaded.connect(self.load_file2_from_drop)
         self.file2_drop.mousePressEvent = lambda e: self.select_file(2)
         files_layout.addWidget(self.file2_drop)
         
         main_layout.addWidget(files_group)
         
-        # Section configuration
-        config_group = QGroupBox("⚙️ Configuration des Colonnes")
-        config_layout = QGridLayout(config_group)
+        # Section configuration des clés de comparaison
+        keys_group = QGroupBox("🔑 Clés de Comparaison (Réconciliation)")
+        keys_layout = QVBoxLayout(keys_group)
         
-        # Fichier 1
-        config_layout.addWidget(QLabel("Fichier 1 - Colonne Référence:"), 0, 0)
-        self.ref1_combo = QComboBox()
-        self.ref1_combo.setEnabled(False)
-        config_layout.addWidget(self.ref1_combo, 0, 1)
+        # Liste des paires de colonnes
+        self.keys_list_widget = QWidget()
+        self.keys_list_layout = QVBoxLayout(self.keys_list_widget)
+        self.keys_list_layout.setSpacing(5)
+        self.keys_list_layout.setContentsMargins(0, 0, 0, 0)
         
-        config_layout.addWidget(QLabel("Fichier 1 - Colonne Montant (optionnel):"), 1, 0)
+        # Message initial
+        self.keys_empty_label = QLabel("Aucune clé de comparaison définie. Cliquez sur 'Ajouter' pour commencer.")
+        self.keys_empty_label.setStyleSheet("color: #718096; font-style: italic;")
+        self.keys_list_layout.addWidget(self.keys_empty_label)
+        
+        keys_layout.addWidget(self.keys_list_widget)
+        
+        # Boutons d'action
+        keys_buttons_layout = QHBoxLayout()
+        
+        self.add_key_btn = QPushButton("➕ Ajouter une colonne de comparaison")
+        self.add_key_btn.setEnabled(False)
+        self.add_key_btn.clicked.connect(self.add_comparison_key)
+        keys_buttons_layout.addWidget(self.add_key_btn)
+        
+        keys_layout.addLayout(keys_buttons_layout)
+        
+        # Info
+        keys_info = QLabel("💡 Astuce: Ajoutez plusieurs colonnes pour une réconciliation plus précise (ex: ID + Date + Client)")
+        keys_info.setStyleSheet("color: #4a5568; font-size: 11px;")
+        keys_layout.addWidget(keys_info)
+        
+        main_layout.addWidget(keys_group)
+        
+        # Section montants (optionnel)
+        amounts_group = QGroupBox("💰 Colonnes de Montant (Optionnel)")
+        amounts_layout = QGridLayout(amounts_group)
+        
+        amounts_layout.addWidget(QLabel("Fichier 1 - Montant:"), 0, 0)
         self.amount1_combo = QComboBox()
         self.amount1_combo.setEnabled(False)
         self.amount1_combo.addItem("(Aucune)")
-        config_layout.addWidget(self.amount1_combo, 1, 1)
+        amounts_layout.addWidget(self.amount1_combo, 0, 1)
         
-        # Fichier 2
-        config_layout.addWidget(QLabel("Fichier 2 - Colonne Référence:"), 0, 2)
-        self.ref2_combo = QComboBox()
-        self.ref2_combo.setEnabled(False)
-        config_layout.addWidget(self.ref2_combo, 0, 3)
-        
-        config_layout.addWidget(QLabel("Fichier 2 - Colonne Montant (optionnel):"), 1, 2)
+        amounts_layout.addWidget(QLabel("Fichier 2 - Montant:"), 0, 2)
         self.amount2_combo = QComboBox()
         self.amount2_combo.setEnabled(False)
         self.amount2_combo.addItem("(Aucune)")
-        config_layout.addWidget(self.amount2_combo, 1, 3)
+        amounts_layout.addWidget(self.amount2_combo, 0, 3)
         
-        # Connecter les changements
-        self.ref1_combo.currentTextChanged.connect(self.check_ready)
-        self.ref2_combo.currentTextChanged.connect(self.check_ready)
+        main_layout.addWidget(amounts_group)
         
-        main_layout.addWidget(config_group)
+        # Section boutons (Réconciliation + Réinitialisation)
+        buttons_layout = QHBoxLayout()
         
         # Bouton de réconciliation
         self.reconcile_btn = QPushButton("🚀 Lancer la Réconciliation")
         self.reconcile_btn.setEnabled(False)
         self.reconcile_btn.setMinimumHeight(50)
         self.reconcile_btn.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.reconcile_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.reconcile_btn.clicked.connect(self.run_reconciliation)
-        main_layout.addWidget(self.reconcile_btn)
+        buttons_layout.addWidget(self.reconcile_btn, stretch=4)
+        
+        # Bouton Réinitialisation
+        self.reset_btn = QPushButton("🔄 Réinitialisation")
+        self.reset_btn.setObjectName("reset_btn")
+        self.reset_btn.setToolTip("Effacer tous les fichiers et recommencer")
+        self.reset_btn.setMinimumHeight(50)
+        self.reset_btn.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.reset_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.reset_btn.clicked.connect(self.reset_all)
+        buttons_layout.addWidget(self.reset_btn, stretch=1)
+        
+        main_layout.addLayout(buttons_layout)
+        
+        # Label de statut réconciliation (caché par défaut)
+        self.status_reconciliation = QLabel("⏳ Réconciliation en cours...")
+        self.status_reconciliation.setAlignment(Qt.AlignCenter)
+        self.status_reconciliation.setStyleSheet("""
+            QLabel {
+                background-color: #ebf8ff;
+                color: #2b6cb0;
+                padding: 10px;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+        """)
+        self.status_reconciliation.setVisible(False)
+        main_layout.addWidget(self.status_reconciliation)
         
         # Section résultats
         results_group = QGroupBox("📊 Résultats")
         results_layout = QVBoxLayout(results_group)
         
-        # Statistiques
         self.stats_label = QLabel("Aucune réconciliation effectuée")
         self.stats_label.setAlignment(Qt.AlignCenter)
         self.stats_label.setStyleSheet("""
@@ -175,10 +252,8 @@ class MainWindow(QMainWindow):
         """)
         results_layout.addWidget(self.stats_label)
         
-        # Splitter pour les tableaux
         splitter = QSplitter(Qt.Vertical)
         
-        # Tableau 1: Missing dans fichier 1
         w1 = QWidget()
         l1 = QVBoxLayout(w1)
         l1.setContentsMargins(0, 0, 0, 0)
@@ -190,7 +265,6 @@ class MainWindow(QMainWindow):
         l1.addWidget(self.table_missing1)
         splitter.addWidget(w1)
         
-        # Tableau 2: Missing dans fichier 2
         w2 = QWidget()
         l2 = QVBoxLayout(w2)
         l2.setContentsMargins(0, 0, 0, 0)
@@ -204,16 +278,15 @@ class MainWindow(QMainWindow):
         
         results_layout.addWidget(splitter)
         
-        # Bouton export
         self.export_btn = QPushButton("💾 Exporter vers Excel")
         self.export_btn.setEnabled(False)
         self.export_btn.setMinimumHeight(40)
+        self.export_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.export_btn.clicked.connect(self.export_results)
         results_layout.addWidget(self.export_btn)
         
         main_layout.addWidget(results_group, stretch=1)
         
-        # Barre de statut
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Prêt")
@@ -250,6 +323,12 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {
                 background-color: #cbd5e0;
                 color: #718096;
+            }
+            QPushButton#reset_btn {
+                background-color: #4299e1;
+            }
+            QPushButton#reset_btn:hover {
+                background-color: #3182ce;
             }
             QComboBox {
                 padding: 8px;
@@ -317,7 +396,6 @@ class MainWindow(QMainWindow):
         """)
     
     def load_file1_from_drop(self, file_path):
-        """Charger le fichier 1 depuis le drop"""
         self.file1_drop.file_path = file_path
         success, message = self.reconciliator.load_file1(file_path)
         if success:
@@ -325,7 +403,6 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(message)
     
     def load_file2_from_drop(self, file_path):
-        """Charger le fichier 2 depuis le drop"""
         self.file2_drop.file_path = file_path
         success, message = self.reconciliator.load_file2(file_path)
         if success:
@@ -333,9 +410,11 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(message)
     
     def select_file(self, file_num):
-        """Ouvre le dialogue de sélection de fichier"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, f"Sélectionner le fichier {file_num}", "", "Excel Files (*.xlsx *.xls)"
+            self, 
+            f"Sélectionner le fichier {file_num}", 
+            "", 
+            "Fichiers supportés (*.xlsx *.xls *.csv);;Excel (*.xlsx *.xls);;CSV (*.csv)"
         )
         
         if not file_path:
@@ -361,32 +440,27 @@ class MainWindow(QMainWindow):
     def update_combos(self, file_num):
         if file_num == 1:
             cols = self.reconciliator.get_file1_columns()
-            self.ref1_combo.clear()
-            self.ref1_combo.addItems(cols)
-            self.ref1_combo.setEnabled(True)
-            
             self.amount1_combo.clear()
             self.amount1_combo.addItem("(Aucune)")
             self.amount1_combo.addItems(cols)
             self.amount1_combo.setEnabled(True)
         else:
             cols = self.reconciliator.get_file2_columns()
-            self.ref2_combo.clear()
-            self.ref2_combo.addItems(cols)
-            self.ref2_combo.setEnabled(True)
-            
             self.amount2_combo.clear()
             self.amount2_combo.addItem("(Aucune)")
             self.amount2_combo.addItems(cols)
             self.amount2_combo.setEnabled(True)
+        
+        # Activer le bouton d'ajout si les deux fichiers sont chargés
+        if (self.reconciliator.file1_data is not None and 
+            self.reconciliator.file2_data is not None):
+            self.add_key_btn.setEnabled(True)
     
     def check_ready(self):
-        ready = (self.ref1_combo.currentText() != "" and 
-                self.ref2_combo.currentText() != "")
+        ready = len(self.comparison_keys) > 0
         self.reconcile_btn.setEnabled(ready)
     
     def run_reconciliation(self):
-        # Récupérer les colonnes sélectionnées
         amount1 = self.amount1_combo.currentText()
         amount2 = self.amount2_combo.currentText()
         
@@ -395,37 +469,54 @@ class MainWindow(QMainWindow):
         if amount2 == "(Aucune)":
             amount2 = None
         
-        self.reconciliator.set_columns(
-            self.ref1_combo.currentText(),
-            self.ref2_combo.currentText(),
+        self.reconciliator.set_comparison_keys(
+            self.comparison_keys,
             amount1,
             amount2
         )
         
-        self.status_bar.showMessage("Réconciliation en cours...")
         self.reconcile_btn.setEnabled(False)
+        self.reconcile_btn.setText("⏳ Patientez...")
+        self.status_reconciliation.setVisible(True)
+        self.status_bar.showMessage("Réconciliation en cours...")
         
-        success, result = self.reconciliator.reconcile()
+        self.thread = QThread()
+        self.worker = ReconciliationWorker(self.reconciliator)
+        self.worker.moveToThread(self.thread)
         
-        if not success:
-            QMessageBox.critical(self, "Erreur", str(result))
-            self.status_bar.showMessage("Erreur de réconciliation")
-            self.reconcile_btn.setEnabled(True)
-            return
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.handle_reconciliation_success)
+        self.worker.error.connect(self.handle_reconciliation_error)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.error.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
         
+        self.thread.start()
+    
+    def handle_reconciliation_success(self, result):
         self.current_result = result
         self.display_results(result)
         
-        self.status_bar.showMessage("Réconciliation terminée")
         self.reconcile_btn.setEnabled(True)
+        self.reconcile_btn.setText("🚀 Lancer la Réconciliation")
+        self.status_reconciliation.setVisible(False)
         self.export_btn.setEnabled(True)
+        self.status_bar.showMessage("Réconciliation terminée avec succès")
+    
+    def handle_reconciliation_error(self, error_msg):
+        QMessageBox.critical(self, "Erreur", error_msg)
+        
+        self.reconcile_btn.setEnabled(True)
+        self.reconcile_btn.setText("🚀 Lancer la Réconciliation")
+        self.status_reconciliation.setVisible(False)
+        self.status_bar.showMessage("Erreur de réconciliation")
     
     def display_results(self, result: ReconciliationResult):
-        # Mettre à jour les labels avec les vrais noms de fichiers
         self.label_missing1.setText(f"❌ Transactions uniquement dans {result.file1_name} ({len(result.file1_missing)})")
         self.label_missing2.setText(f"❌ Transactions uniquement dans {result.file2_name} ({len(result.file2_missing)})")
         
-        # Statistiques
         match_rate = (result.matched_count / max(result.file1_total, result.file2_total)) * 100
         
         stats_html = f"""
@@ -444,7 +535,6 @@ class MainWindow(QMainWindow):
             </tr>
         """
         
-        # Ajouter les montants si disponibles (sur les matched uniquement)
         if result.file1_matched_amount_total is not None:
             stats_html += f"""
             <tr style='background-color: #ebf8ff;'>
@@ -470,7 +560,6 @@ class MainWindow(QMainWindow):
         stats_html += "</table>"
         self.stats_label.setText(stats_html)
         
-        # Tableaux
         self.populate_table(self.table_missing1, result.file1_missing)
         self.populate_table(self.table_missing2, result.file2_missing)
     
@@ -515,3 +604,143 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.critical(self, "Erreur", message)
                 self.status_bar.showMessage(message)
+
+    def reset_all(self):
+        self.reconciliator = Reconciliator()
+        self.current_result = None
+        
+        self.file1_drop.file_path = None
+        self.file1_drop.label.setText("📁 Fichier Source 1\n\nGlissez-déposez un fichier\nExcel ou CSV\nou cliquez pour parcourir")
+        self.file1_drop.label.setStyleSheet("color: #4a5568; font-size: 12px;")
+        
+        self.file2_drop.file_path = None
+        self.file2_drop.label.setText("📁 Fichier Source 2\n\nGlissez-déposez un fichier\nExcel ou CSV\nou cliquez pour parcourir")
+        self.file2_drop.label.setStyleSheet("color: #4a5568; font-size: 12px;")
+        
+        self.amount1_combo.clear()
+        self.amount1_combo.addItem("(Aucune)")
+        self.amount1_combo.setEnabled(False)
+        
+        self.amount2_combo.clear()
+        self.amount2_combo.addItem("(Aucune)")
+        self.amount2_combo.setEnabled(False)
+        
+        self.reconcile_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        
+        self.comparison_keys = []
+        self.refresh_keys_list()
+        self.add_key_btn.setEnabled(False)
+        
+        self.stats_label.setText("Aucune réconciliation effectuée")
+        self.table_missing1.clear()
+        self.table_missing1.setRowCount(0)
+        self.table_missing1.setColumnCount(0)
+        self.table_missing2.clear()
+        self.table_missing2.setRowCount(0)
+        self.table_missing2.setColumnCount(0)
+        self.label_missing1.setText("❌ Transactions uniquement dans Fichier 1")
+        self.label_missing2.setText("❌ Transactions uniquement dans Fichier 2")
+        
+        self.status_reconciliation.setVisible(False)
+        
+        self.status_bar.showMessage("Prêt - Tout a été réinitialisé")
+
+    def add_comparison_key(self):
+        """Ajoute une nouvelle paire de colonnes de comparaison"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Ajouter une clé de comparaison")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        layout.addWidget(QLabel("Colonne dans Fichier 1:"))
+        combo1 = QComboBox()
+        combo1.addItems(self.reconciliator.get_file1_columns())
+        layout.addWidget(combo1)
+        
+        layout.addWidget(QLabel("Colonne dans Fichier 2:"))
+        combo2 = QComboBox()
+        combo2.addItems(self.reconciliator.get_file2_columns())
+        layout.addWidget(combo2)
+        
+        buttons = QHBoxLayout()
+        btn_ok = QPushButton("Ajouter")
+        btn_ok.clicked.connect(dialog.accept)
+        btn_cancel = QPushButton("Annuler")
+        btn_cancel.clicked.connect(dialog.reject)
+        buttons.addWidget(btn_ok)
+        buttons.addWidget(btn_cancel)
+        layout.addLayout(buttons)
+        
+        if dialog.exec() == QDialog.Accepted:
+            col1 = combo1.currentText()
+            col2 = combo2.currentText()
+            
+            if col1 and col2:
+                self.comparison_keys.append((col1, col2))
+                self.refresh_keys_list()
+                self.check_ready()
+    
+    def refresh_keys_list(self):
+        """Rafraîchit l'affichage des clés de comparaison"""
+        while self.keys_list_layout.count():
+            item = self.keys_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        if not self.comparison_keys:
+            self.keys_empty_label = QLabel("Aucune clé de comparaison définie. Cliquez sur 'Ajouter' pour commencer.")
+            self.keys_empty_label.setStyleSheet("color: #718096; font-style: italic;")
+            self.keys_list_layout.addWidget(self.keys_empty_label)
+        else:
+            for i, (col1, col2) in enumerate(self.comparison_keys):
+                key_widget = QWidget()
+                key_layout = QHBoxLayout(key_widget)
+                key_layout.setContentsMargins(5, 5, 5, 5)
+                key_layout.setSpacing(10)
+                
+                bg_color = "#f7fafc" if i % 2 == 0 else "#edf2f7"
+                key_widget.setStyleSheet(f"""
+                    QWidget {{
+                        background-color: {bg_color};
+                        border-radius: 4px;
+                        border: 1px solid #e2e8f0;
+                    }}
+                """)
+                
+                label = QLabel(f"<b>{i+1}.</b> {col1} = {col2}")
+                label.setStyleSheet("color: #2d3748; border: none; background: transparent;")
+                key_layout.addWidget(label)
+                
+                key_layout.addStretch()
+                
+                btn_delete = QPushButton("🗑️")
+                btn_delete.setToolTip("Supprimer cette clé")
+                btn_delete.setMaximumWidth(40)
+                btn_delete.setStyleSheet("""
+                    QPushButton {
+                        background-color: #fc8181;
+                        color: white;
+                        border: none;
+                        border-radius: 4px;
+                        padding: 2px;
+                    }
+                    QPushButton:hover {
+                        background-color: #f56565;
+                    }
+                """)
+                btn_delete.setCursor(QCursor(Qt.PointingHandCursor))
+                btn_delete.clicked.connect(lambda checked, idx=i: self.remove_key(idx))
+                key_layout.addWidget(btn_delete)
+                
+                self.keys_list_layout.addWidget(key_widget)
+        
+        self.keys_list_layout.addStretch()
+    
+    def remove_key(self, index):
+        """Supprime une clé de comparaison"""
+        if 0 <= index < len(self.comparison_keys):
+            del self.comparison_keys[index]
+            self.refresh_keys_list()
+            self.check_ready()

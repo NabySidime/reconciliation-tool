@@ -14,6 +14,7 @@ Développé en Python avec PySide6 pour l'interface graphique et pandas pour le 
 
 - **Générique** : Fonctionne avec n'importe quels fichiers Excel (banques, stocks, clients...)
 - **Drag & Drop** : Glissez-déposez vos fichiers ou parcourez pour les sélectionner
+- **Clés de comparaison multiples** : Combinez plusieurs colonnes pour une réconciliation précise (ex: ID + Date + Montant)
 - **Détection automatique** des colonnes
 - **Comparaison par référence** : Identifie les transactions présentes dans un fichier mais pas l'autre
 - **Comparaison des montants** : Détecte les écarts de montant sur les transactions correspondantes
@@ -183,3 +184,11 @@ Les résultats s'affichent dans l'interface :
 ### 6. Exporter
 
 Cliquez sur **"Exporter vers Excel"** pour sauvegarder les résultats détaillés.
+
+
+
+git remote set-url origin https://github.com/mapaycard/reconciliation-tool.git
+
+git remote set-url origin https://github.com/NabySidime/reconciliation-tool.git
+
+git remote -v
