@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QGroupBox, 
     QMessageBox, QSplitter, QFrame,
     QHeaderView, QStatusBar, QGridLayout,
-    QDialog  # AJOUTÉ
+    QDialog
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QFont, QCursor
@@ -517,7 +517,10 @@ class MainWindow(QMainWindow):
         self.label_missing1.setText(f"❌ Transactions uniquement dans {result.file1_name} ({len(result.file1_missing)})")
         self.label_missing2.setText(f"❌ Transactions uniquement dans {result.file2_name} ({len(result.file2_missing)})")
         
-        match_rate = (result.matched_count / max(result.file1_total, result.file2_total)) * 100
+        # Calcul du taux basé sur les lignes réelles (strict 1:1)
+        file1_match_rate = (result.file1_matched_lines / result.file1_total * 100) if result.file1_total > 0 else 0
+        file2_match_rate = (result.file2_matched_lines / result.file2_total * 100) if result.file2_total > 0 else 0
+        match_rate = min(file1_match_rate, file2_match_rate)  # Taux le plus conservateur
         
         stats_html = f"""
         <table style='margin: 0 auto; font-size: 14px;'>
@@ -529,9 +532,9 @@ class MainWindow(QMainWindow):
             </tr>
             <tr>
                 <td style='padding: 5px 20px;'><b>✅ Correspondances:</b></td>
-                <td style='padding: 5px 20px; color: #48bb78;'>{result.matched_count}</td>
+                <td style='padding: 5px 20px; color: #48bb78;'>{result.file1_matched_lines}</td>
                 <td style='padding: 5px 20px;'><b>📊 Taux:</b></td>
-                <td style='padding: 5px 20px; color: {"#48bb78" if match_rate > 90 else "#ed8936" if match_rate > 70 else "#e53e3e"};'>{match_rate:.1f}%</td>
+                <td style='padding: 5px 20px; color: {"#48bb78" if match_rate > 90 else "#ed8936" if match_rate > 70 else "#e53e3e"}; font-weight: bold;'>{match_rate:.1f}%</td>
             </tr>
         """
         
@@ -560,6 +563,7 @@ class MainWindow(QMainWindow):
         stats_html += "</table>"
         self.stats_label.setText(stats_html)
         
+        # CORRECTION : Utiliser self.table_missing2 et self.table_missing1 (pas self.table.table_missing2)
         self.populate_table(self.table_missing1, result.file1_missing)
         self.populate_table(self.table_missing2, result.file2_missing)
     
@@ -709,7 +713,7 @@ class MainWindow(QMainWindow):
                     }}
                 """)
                 
-                label = QLabel(f"<b>{i+1}.</b> {col1} = {col2}")
+                label = QLabel(f"<b>{i+1}.</b> {col1} ↔ {col2}")
                 label.setStyleSheet("color: #2d3748; border: none; background: transparent;")
                 key_layout.addWidget(label)
                 

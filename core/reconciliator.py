@@ -2,6 +2,7 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
 from pathlib import Path
+from collections import Counter
 
 @dataclass
 class ReconciliationResult:
@@ -9,7 +10,7 @@ class ReconciliationResult:
     file2_name: str
     file1_total: int
     file2_total: int
-    matched_count: int
+    matched_count: int              # Nombre de paires 1:1 (références uniques matchées)
     file1_missing: pd.DataFrame
     file2_missing: pd.DataFrame
     file1_matched: pd.DataFrame
@@ -20,7 +21,9 @@ class ReconciliationResult:
     amount_discrepancies: pd.DataFrame
     discrepancy_count: int
     aggregation_mode: bool
-    comparison_keys: List[Tuple[str, str]]  # Liste des paires de colonnes comparées
+    comparison_keys: List[Tuple[str, str]]
+    file1_matched_lines: int        # Nombre de lignes réelles matched (strict 1:1)
+    file2_matched_lines: int        # Nombre de lignes réelles matched (strict 1:1)
 
 class Reconciliator:
     def __init__(self):
@@ -28,7 +31,7 @@ class Reconciliator:
         self.file2_data: Optional[pd.DataFrame] = None
         self.file1_name: str = ""
         self.file2_name: str = ""
-        self.comparison_keys: List[Tuple[str, str]] = []  # [(col1_fichier1, col1_fichier2), ...]
+        self.comparison_keys: List[Tuple[str, str]] = []
         self.amount_col1: Optional[str] = None
         self.amount_col2: Optional[str] = None
         self.aggregation_mode: bool = False
@@ -135,35 +138,91 @@ class Reconciliator:
                 refs2 = file2_agg['_composite_key']
                 working_df1 = file1_agg
                 working_df2 = file2_agg
-            else:
-                working_df1 = self.file1_data
-                working_df2 = self.file2_data
-            
-            # Ensembles pour comparaison
-            set1 = set(refs1)
-            set2 = set(refs2)
-            
-            # Différences et intersection
-            only_in_1 = set1 - set2
-            only_in_2 = set2 - set1
-            matched_refs = set1 & set2
-            
-            # Filtrer DataFrames
-            if self.aggregation_mode:
+                
+                # En mode agrégation, on garde le comportement actuel (une ligne par référence)
+                set1 = set(refs1)
+                set2 = set(refs2)
+                
+                only_in_1 = set1 - set2
+                only_in_2 = set2 - set1
+                matched_refs = set1 & set2
+                
                 file1_missing = working_df1[working_df1['_composite_key'].isin(only_in_1)].copy()
                 file2_missing = working_df2[working_df2['_composite_key'].isin(only_in_2)].copy()
                 file1_matched = working_df1[working_df1['_composite_key'].isin(matched_refs)].copy()
                 file2_matched = working_df2[working_df2['_composite_key'].isin(matched_refs)].copy()
+                
+                # Nettoyer les colonnes temporaires
+                for df in [file1_missing, file2_missing, file1_matched, file2_matched]:
+                    if '_composite_key' in df.columns:
+                        df.drop(columns=['_composite_key'], inplace=True)
+                
+                file1_matched_lines = len(file1_matched)
+                file2_matched_lines = len(file2_matched)
+                
             else:
-                file1_missing = self.file1_data[self.file1_data['_composite_key'].isin(only_in_1)].copy()
-                file2_missing = self.file2_data[self.file2_data['_composite_key'].isin(only_in_2)].copy()
-                file1_matched = self.file1_data[self.file1_data['_composite_key'].isin(matched_refs)].copy()
-                file2_matched = self.file2_data[self.file2_data['_composite_key'].isin(matched_refs)].copy()
-            
-            # Nettoyer les colonnes temporaires
-            for df in [file1_missing, file2_missing, file1_matched, file2_matched]:
-                if '_composite_key' in df.columns:
-                    df.drop(columns=['_composite_key'], inplace=True)
+                # MODE STRICT 1:1 - Nouvelle logique
+                working_df1 = self.file1_data
+                working_df2 = self.file2_data
+                
+                # Compter les occurrences de chaque clé
+                counts1 = Counter(refs1)
+                counts2 = Counter(refs2)
+                
+                set1 = set(refs1)
+                set2 = set(refs2)
+                
+                # Listes pour stocker les indices
+                matched_indices_f1 = []
+                matched_indices_f2 = []
+                missing_indices_f1 = []
+                missing_indices_f2 = []
+                matched_refs = set()
+                
+                # Pour chaque référence présente dans les deux fichiers
+                for key in set1 & set2:
+                    # Nombre de paires 1:1 possibles
+                    pairs_count = min(counts1[key], counts2[key])
+                    matched_refs.add(key)
+                    
+                    # Prendre les premières lignes pour le match
+                    indices_f1 = working_df1[working_df1['_composite_key'] == key].index[:pairs_count]
+                    indices_f2 = working_df2[working_df2['_composite_key'] == key].index[:pairs_count]
+                    
+                    matched_indices_f1.extend(indices_f1.tolist())
+                    matched_indices_f2.extend(indices_f2.tolist())
+                    
+                    # Les lignes en trop vont en missing
+                    if counts1[key] > pairs_count:
+                        extra_f1 = working_df1[working_df1['_composite_key'] == key].index[pairs_count:]
+                        missing_indices_f1.extend(extra_f1.tolist())
+                    
+                    if counts2[key] > pairs_count:
+                        extra_f2 = working_df2[working_df2['_composite_key'] == key].index[pairs_count:]
+                        missing_indices_f2.extend(extra_f2.tolist())
+                
+                # Les références uniquement dans un fichier
+                for key in set1 - set2:
+                    missing_f1 = working_df1[working_df1['_composite_key'] == key].index
+                    missing_indices_f1.extend(missing_f1.tolist())
+                
+                for key in set2 - set1:
+                    missing_f2 = working_df2[working_df2['_composite_key'] == key].index
+                    missing_indices_f2.extend(missing_f2.tolist())
+                
+                # Créer les DataFrames
+                file1_matched = working_df1.loc[matched_indices_f1].copy() if matched_indices_f1 else pd.DataFrame()
+                file2_matched = working_df2.loc[matched_indices_f2].copy() if matched_indices_f2 else pd.DataFrame()
+                file1_missing = working_df1.loc[missing_indices_f1].copy() if missing_indices_f1 else pd.DataFrame()
+                file2_missing = working_df2.loc[missing_indices_f2].copy() if missing_indices_f2 else pd.DataFrame()
+                
+                # Nettoyer les colonnes temporaires
+                for df in [file1_matched, file2_matched, file1_missing, file2_missing]:
+                    if '_composite_key' in df.columns:
+                        df.drop(columns=['_composite_key'], inplace=True)
+                
+                file1_matched_lines = len(matched_indices_f1)
+                file2_matched_lines = len(matched_indices_f2)
             
             # Calculs des montants sur les MATCHED
             amount1_total = None
@@ -173,55 +232,56 @@ class Reconciliator:
             discrepancy_count = 0
             
             if (self.amount_col1 and self.amount_col1 in working_df1.columns and
-                self.amount_col2 and self.amount_col2 in working_df2.columns):
+                self.amount_col2 and self.amount_col2 in working_df2.columns and
+                len(file1_matched) > 0 and len(file2_matched) > 0):
                 
-                file1_matched[self.amount_col1] = pd.to_numeric(
-                    file1_matched[self.amount_col1], errors='coerce'
+                file1_matched_copy = file1_matched.copy()
+                file2_matched_copy = file2_matched.copy()
+                
+                file1_matched_copy[self.amount_col1] = pd.to_numeric(
+                    file1_matched_copy[self.amount_col1], errors='coerce'
                 )
-                file2_matched[self.amount_col2] = pd.to_numeric(
-                    file2_matched[self.amount_col2], errors='coerce'
+                file2_matched_copy[self.amount_col2] = pd.to_numeric(
+                    file2_matched_copy[self.amount_col2], errors='coerce'
                 )
                 
-                amount1_total = file1_matched[self.amount_col1].sum()
-                amount2_total = file2_matched[self.amount_col2].sum()
+                amount1_total = file1_matched_copy[self.amount_col1].sum()
+                amount2_total = file2_matched_copy[self.amount_col2].sum()
                 amount_diff = amount1_total - amount2_total
                 
-                # Identifier les écarts ligne par ligne
-                discrepancies = []
-                
-                # Recréer les clés composites pour comparaison
-                file1_matched['_ref'] = self._create_composite_key(
-                    file1_matched, [pair[0] for pair in self.comparison_keys]
-                ) if not self.aggregation_mode else file1_matched.index.astype(str)
-                
-                file2_matched['_ref'] = self._create_composite_key(
-                    file2_matched, [pair[1] for pair in self.comparison_keys]
-                ) if not self.aggregation_mode else file2_matched.index.astype(str)
-                
-                for ref in matched_refs:
-                    rows1 = file1_matched[file1_matched['_ref'] == ref]
-                    rows2 = file2_matched[file2_matched['_ref'] == ref]
+                # Identifier les écarts ligne par ligne (uniquement en mode non-agrégé)
+                if not self.aggregation_mode:
+                    discrepancies = []
                     
-                    if len(rows1) > 0 and len(rows2) > 0:
-                        amt1 = rows1[self.amount_col1].iloc[0]
-                        amt2 = rows2[self.amount_col2].iloc[0]
+                    # Recréer les clés composites pour comparaison
+                    file1_matched_copy['_ref'] = self._create_composite_key(
+                        file1_matched_copy, [pair[0] for pair in self.comparison_keys]
+                    )
+                    file2_matched_copy['_ref'] = self._create_composite_key(
+                        file2_matched_copy, [pair[1] for pair in self.comparison_keys]
+                    )
+                    
+                    # Comparer ligne par ligne (ordre des indices)
+                    for i in range(min(len(file1_matched_copy), len(file2_matched_copy))):
+                        ref1 = file1_matched_copy['_ref'].iloc[i]
+                        ref2 = file2_matched_copy['_ref'].iloc[i]
                         
-                        if pd.notna(amt1) and pd.notna(amt2) and abs(amt1 - amt2) > 0.01:
-                            discrepancies.append({
-                                'Reference': ref.replace('||', ' + '),
-                                f'Montant_{self.file1_name}': amt1,
-                                f'Montant_{self.file2_name}': amt2,
-                                'Ecart': amt1 - amt2,
-                                'Ecart_pct': ((amt1 - amt2) / amt2 * 100) if amt2 != 0 else None
-                            })
-                
-                if discrepancies:
-                    discrepancies_df = pd.DataFrame(discrepancies)
-                    discrepancy_count = len(discrepancies)
-                
-                for df in [file1_matched, file2_matched]:
-                    if '_ref' in df.columns:
-                        df.drop(columns=['_ref'], inplace=True)
+                        if ref1 == ref2:  # Même référence
+                            amt1 = file1_matched_copy[self.amount_col1].iloc[i]
+                            amt2 = file2_matched_copy[self.amount_col2].iloc[i]
+                            
+                            if pd.notna(amt1) and pd.notna(amt2) and abs(amt1 - amt2) > 0.01:
+                                discrepancies.append({
+                                    'Reference': ref1.replace('||', ' + '),
+                                    f'Montant_{self.file1_name}': amt1,
+                                    f'Montant_{self.file2_name}': amt2,
+                                    'Ecart': amt1 - amt2,
+                                    'Ecart_pct': ((amt1 - amt2) / amt2 * 100) if amt2 != 0 else None
+                                })
+                    
+                    if discrepancies:
+                        discrepancies_df = pd.DataFrame(discrepancies)
+                        discrepancy_count = len(discrepancies)
             
             # Nettoyer les données originales
             if '_composite_key' in self.file1_data.columns:
@@ -234,7 +294,7 @@ class Reconciliator:
                 file2_name=self.file2_name,
                 file1_total=len(self.file1_data),
                 file2_total=len(self.file2_data),
-                matched_count=len(matched_refs),
+                matched_count=len(matched_refs),  # Références uniques matchées
                 file1_missing=file1_missing,
                 file2_missing=file2_missing,
                 file1_matched=file1_matched,
@@ -245,7 +305,9 @@ class Reconciliator:
                 amount_discrepancies=discrepancies_df,
                 discrepancy_count=discrepancy_count,
                 aggregation_mode=self.aggregation_mode,
-                comparison_keys=self.comparison_keys
+                comparison_keys=self.comparison_keys,
+                file1_matched_lines=file1_matched_lines,
+                file2_matched_lines=file2_matched_lines,
             )
             
             return True, result

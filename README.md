@@ -184,11 +184,3 @@ Les résultats s'affichent dans l'interface :
 ### 6. Exporter
 
 Cliquez sur **"Exporter vers Excel"** pour sauvegarder les résultats détaillés.
-
-
-
-git remote set-url origin https://github.com/mapaycard/reconciliation-tool.git
-
-git remote set-url origin https://github.com/NabySidime/reconciliation-tool.git
-
-git remote -v
