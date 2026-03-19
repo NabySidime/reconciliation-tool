@@ -1,75 +1,92 @@
 ```markdown
-# Reconciliation Tool
+# Reconciliation Tool 211101
 
-Outil desktop léger pour automatiser la réconciliation de transactions entre deux fichiers Excel. 
+Outil desktop pour automatiser la réconciliation de transactions entre deux fichiers Excel/CSV. 
 Développé en Python avec PySide6 pour l'interface graphique et pandas pour le traitement des données.
-
-![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
 
 ---
 
 ## Fonctionnalités
 
-- **Générique** : Fonctionne avec n'importe quels fichiers Excel (banques, stocks, clients...)
+- **Générique** : Fonctionne avec n'importe quels fichiers Excel/CSV (banques, stocks, clients, paiements...)
 - **Drag & Drop** : Glissez-déposez vos fichiers ou parcourez pour les sélectionner
 - **Clés de comparaison multiples** : Combinez plusieurs colonnes pour une réconciliation précise (ex: ID + Date + Montant)
-- **Détection automatique** des colonnes
-- **Comparaison par référence** : Identifie les transactions présentes dans un fichier mais pas l'autre
+- **Mode Strict 1:1** : Appariement ligne à ligne - les doublons non symétriques vont en missing
 - **Comparaison des montants** : Détecte les écarts de montant sur les transactions correspondantes
-- **Export Excel** : Génère 6 feuilles avec les résultats détaillés
+- **Gestion des valeurs vides** : Les lignes avec clés de comparaison incomplètes sont signalées en missing
+- **Export Excel multi-feuilles** : Génère un fichier complet avec tous les résultats
+- **Threading** : Interface réactive pendant le traitement (pas de blocage)
 - **Offline** : Fonctionne sans connexion internet
 - **Léger** : Aucune limite de taille de fichier (dépend de la RAM)
 
 ---
 
-## Gestion des doublons
+## Architecture du Projet
 
-Le programme gère les références en double de la manière suivante :
+```
+reconciliation_app/
+├── core/
+│   └── reconciliator.py      # Logique métier de réconciliation
+├── gui/
+│   └── main_window.py        # Interface PySide6 (DropArea, tableaux, etc.)
+├── utils/
+│   └── excel_handler.py      # Gestion des exports Excel
+├── assets/                   # Icônes, images, ressources
+├── main.py                   # Point d'entrée de l'application
+├── requirements.txt          # Dépendances Python
+└── README.md                 # Ce fichier
+```
 
-| Aspect | Comportement | Exemple |
-|--------|--------------|---------|
-| **Stats** | Compte les **références uniques** | 3 correspondances (REF001, REF002, REF003) |
-| **Feuilles matched** | Contient **toutes les lignes** | 4 lignes si REF001 apparaît 2 fois |
-| **Montants** | **Somme de toutes les lignes** | 500€ + 500€ = 1000€ pour REF001 |
+---
 
-### Cas pratique
+## Modes de Réconciliation
 
-**Fichier 1 :**
-| référence | montant |
-|-----------|---------|
-| REF001 | 500€ |
-| REF001 | 500€ | ← même référence, 2ème paiement |
-| REF002 | 300€ |
+### Mode Strict 1:1 (par défaut)
+Chaque ligne est appariée individuellement avec une seule ligne de l'autre fichier.
 
-**Fichier 2 :**
-| référence | montant |
-|-----------|---------|
-| REF001 | 1000€ | ← somme des deux paiements |
-| REF002 | 300€ |
+| Fichier 1 | | Fichier 2 | | Résultat |
+|-----------|---|-----------|---|----------|
+| REF001 | 250€ | REF001 | 500€ | 1 ligne matchée |
+| REF001 | 250€ | | | 1 ligne en F1_missing |
 
-**Résultat :**
-- Stats : "2 correspondances" (REF001 et REF002)
-- Feuille Fichier1_matched : 3 lignes (les 2 REF001 + REF002)
-- Montant total Fichier 1 : 1300€ (500 + 500 + 300)
-- Montant total Fichier 2 : 1300€ (1000 + 300)
-- Écart : 0€
+**Règle** : `min(count_F1, count_F2)` lignes matchées, le surplus va en missing.
 
-> **Note** : Ce comportement est adapté aux cas de paiements échelonnés où une référence peut apparaître plusieurs fois. Les montants sont toujours sommés correctement.
+## Gestion des doublons et valeurs vides
+
+### Doublons asymétriques
+| Cas | Fichier 1 | Fichier 2 | Mode Strict |
+|-----|-----------|-----------|-------------|
+| 2×REF001 vs 1×REF001 | 2 lignes | 1 ligne | 1 match + 1 missing |
+| 3×REF002 vs 1×REF002 | 3 lignes | 1 ligne | 1 match + 2 missing |
+
+### Valeurs vides dans les clés de comparaison
+Les lignes avec une ou plusieurs valeurs vides dans les colonnes de comparaison sont :
+- Assignées une clé unique temporaire (`__EMPTY_{index}__`)
+- **Toujours placées en missing** de leur fichier respectif
+- **Jamais matchées** avec l'autre fichier
+
+Cela garantit qu'aucune ligne ne "disparaît" silencieusement.
 
 ---
 
 ## Structure des fichiers générés
 
-| Feuille | Description |
-|---------|-------------|
-| `Fichier1_missing` | Transactions présentes dans Fichier 1 mais absentes de Fichier 2 |
-| `Fichier2_missing` | Transactions présentes dans Fichier 2 mais absentes de Fichier 1 |
-| `Fichier1_matched` | Transactions de Fichier 1 ayant une correspondance dans Fichier 2 |
-| `Fichier2_matched` | Transactions de Fichier 2 ayant une correspondance dans Fichier 1 |
-| `Ecarts_montant` | Détail des transactions avec écarts de montant |
-| `Summary` | Statistiques globales et totaux |
+L'export Excel contient 6 feuilles détaillées :
+
+| Feuille | Description | Usage |
+|---------|-------------|-------|
+| `Fichier1_missing` | Transactions présentes dans Fichier 1 mais absentes de Fichier 2 | À traiter/rechercher |
+| `Fichier2_missing` | Transactions présentes dans Fichier 2 mais absentes de Fichier 1 | À traiter/rechercher |
+| `Fichier1_matched` | Transactions de Fichier 1 ayant une correspondance 1:1 | Vérification |
+| `Fichier2_matched` | Transactions de Fichier 2 ayant une correspondance 1:1 | Vérification |
+| `Ecarts_montant` | Détail des transactions avec écarts de montant (> 0.01€) | Investigation |
+| `Summary` | Statistiques globales, taux de correspondance, totaux | Reporting |
+
+**Colonnes dans Ecarts_montant :**
+- `Reference` : La clé composite concernée
+- `Montant_[Fichier1]` vs `Montant_[Fichier2]` : Valeurs comparées
+- `Ecart` : Différence absolue
+- `Ecart_pct` : Pourcentage d'écart
 
 ---
 
@@ -78,13 +95,13 @@ Le programme gère les références en double de la manière suivante :
 ### Prérequis
 
 - Python 3.9 ou supérieur
-- Windows 10/11
+- Windows 10/11 (Linux/Mac possible avec adaptation des chemins)
 
 ### 1. Cloner le repository
 
 ```bash
-git clone https://github.com/NabySidime/reconciliation-tool.git
-cd reconciliation-tool
+git clone https://github.com/mapaycard/reconciliation-tool.git
+cd reconciliation_app
 ```
 
 ### 2. Créer l'environnement virtuel
@@ -102,7 +119,7 @@ env\Scripts\activate
 
 **Windows (PowerShell) :**
 ```powershell
-env\Scripts\Activate.ps1
+.\env\Scripts\activate
 ```
 
 **Linux/Mac :**
@@ -116,6 +133,13 @@ source env/bin/activate
 pip install -r requirements.txt
 ```
 
+**requirements.txt :**
+```
+pandas>=1.5.0
+openpyxl>=3.0.0
+PySide6>=6.4.0
+```
+
 ---
 
 ## Créer l'exécutable (.exe)
@@ -124,8 +148,8 @@ pip install -r requirements.txt
 
 Assurez-vous que l'environnement virtuel est activé, puis :
 
-```bash
-# Nettoyer les anciens builds (Windows PowerShell)
+```powershell
+# Nettoyer les anciens builds (PowerShell)
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 
 # Ou avec CMD
@@ -135,7 +159,7 @@ rmdir /s /q build dist
 pyinstaller --onefile --windowed --clean --noconfirm --name "Reconciliation_Tool" main.py
 ```
 
-L'exécutable sera créé dans le dossier `dist/Reconciliation_Tool.exe`
+L'exécutable sera créé dans `dist/Reconciliation_Tool.exe`
 
 ### Options PyInstaller
 
@@ -149,38 +173,91 @@ L'exécutable sera créé dans le dossier `dist/Reconciliation_Tool.exe`
 
 ---
 
-## Comment utiliser
+## Guide d'utilisation
 
 ### 1. Lancer l'application
 
-Double-cliquez sur `Reconciliation_Tool.exe` ou lancez :
-```bash
-python main.py
-```
+Double-cliquez sur `Reconciliation_Tool.exe`
 
 ### 2. Charger les fichiers
 
-- **Fichier Source 1** : Glissez-déposez ou cliquez pour sélectionner votre premier fichier Excel
-- **Fichier Source 2** : Glissez-déposez ou cliquez pour sélectionner votre second fichier Excel
+- **Fichier Source 1** : Glissez-déposez ou cliquez pour sélectionner
+- **Fichier Source 2** : Glissez-déposez ou cliquez pour sélectionner
 
-### 3. Configurer les colonnes
+Formats supportés : `.xlsx`, `.xls`, `.csv` (séparateur auto-détecté)
 
-| Colonne | Description | Obligatoire |
-|---------|-------------|-------------|
-| **Colonne Référence** | Colonne contenant l'identifiant unique de transaction | Oui |
-| **Colonne Montant** | Colonne contenant le montant (pour vérification) | Optionnel |
+### 3. Configurer les clés de comparaison
 
-### 4. Lancer la réconciliation
+Cliquez sur **"➕ Ajouter une colonne de comparaison"** pour définir les paires de colonnes :
 
-Cliquez sur **"Lancer la Réconciliation"**
+```
+Étape 1 : Sélectionnez la colonne dans Fichier 1 (ex: "Référence")
+Étape 2 : Sélectionnez la colonne correspondante dans Fichier 2 (ex: "Ref_Paiement")
+Étape 3 : Répétez pour ajouter d'autres critères (Date, Client, etc.)
+```
 
-### 5. Analyser les résultats
+Vous pouvez supprimer une clé avec le bouton 🗑️ à tout moment.
 
-Les résultats s'affichent dans l'interface :
-- Statistiques globales (nombre de références uniques)
-- Tableaux des transactions manquantes
-- Totaux des montants (somme de toutes les lignes, y compris doublons)
+### 4. Configurer les montants (Optionnel)
 
-### 6. Exporter
+| Paramètre | Description |
+|-----------|-------------|
+| **Fichier 1 - Montant** | Colonne contenant les montants du fichier 1 |
+| **Fichier 2 - Montant** | Colonne contenant les montants du fichier 2 |
 
-Cliquez sur **"Exporter vers Excel"** pour sauvegarder les résultats détaillés.
+> Si non défini, la réconciliation se fait uniquement sur les clés (présence/absence).
+
+
+### 5. Lancer la réconciliation
+
+Cliquez sur **"🚀 Lancer la Réconciliation"**
+
+L'opération s'exécute en arrière-plan. Une barre de statut indique la progression.
+
+### 6. Analyser les résultats
+
+**Panneau de statistiques :**
+- Nombre total de transactions par fichier
+- Nombre de correspondances (lignes matchées 1:1)
+- Taux de correspondance global
+- Totaux des montants (matched uniquement)
+- Écart total et nombre de lignes avec écart
+
+**Tableaux :**
+- Transactions manquantes dans chaque fichier
+- Coloration alternée pour faciliter la lecture
+- Redimensionnement automatique des colonnes
+
+### 8. Exporter les résultats
+
+Cliquez sur **"💾 Exporter vers Excel"** pour générer le fichier complet avec les 6 feuilles.
+
+### 9. Réinitialiser
+
+Cliquez sur **"🔄 Réinitialisation"** pour tout effacer et recommencer avec de nouveaux fichiers.
+
+---
+
+## Cas d'usage typiques
+
+| Scénario | Configuration recommandée |
+|----------|--------------------------|
+| **Réconciliation bancaire** | Clé : `Numéro_transaction` + `Date`<br>Montant : `Montant` |
+| **Paiements échelonnés** | Clé : `ID_Client` + `Référence_Facture`<br>Montant : `Montant`<br>Mode : Agrégation |
+| **Contrôle de caisse** | Clé : `Numéro_bon` + `Date` + `Caisse`<br>Montant : `Total_TTC` |
+| **Suivi des remboursements** | Clé : `Numéro_dossier` + `Date_remboursement`<br>Montant : `Montant_remboursé` |
+
+---
+
+## Dépannage 071104
+
+| Problème | Solution |
+|----------|----------|
+| "Format non valide" | Vérifiez que le fichier est bien .xlsx, .xls ou .csv |
+| Taux de correspondance faible | Vérifiez le format des données (espaces, casse) ou ajoutez des clés |
+| Lignes avec valeurs vides | Elles apparaissent automatiquement dans la feuille missing |
+| Écarts de montant inexpliqués | Vérifiez que les colonnes de montant sont correctement sélectionnées |
+| Lenteur sur gros fichiers | Normal pour >100k lignes. L'opération est non-bloquante. |
+| Caractères spéciaux illisibles | Sauvegardez vos fichiers en UTF-8 avant import |
+
+---

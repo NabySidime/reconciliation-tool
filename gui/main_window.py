@@ -15,7 +15,7 @@ from core.reconciliator import Reconciliator, ReconciliationResult
 from utils.excel_handler import ExcelHandler
 
 class DropArea(QFrame):
-    """Zone de dépôt de fichiers"""
+    """Zone de dépôt de fichiers 211101"""
     file_loaded = Signal(str)
     
     def __init__(self, title, parent=None):

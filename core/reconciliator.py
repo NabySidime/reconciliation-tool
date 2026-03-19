@@ -116,6 +116,24 @@ class Reconciliator:
             self.file1_data['_composite_key'] = self._create_composite_key(self.file1_data, file1_cols)
             self.file2_data['_composite_key'] = self._create_composite_key(self.file2_data, file2_cols)
             
+            # NOUVEAU : Remplacer les clés vides/NaN par un identifiant unique
+            # pour qu'elles ne se regroupent pas toutes ensemble et apparaissent en missing
+            def handle_empty_key(series):
+                """Remplace les clés vides par un identifiant unique basé sur l'index"""
+                result = []
+                for idx, val in series.items():
+                    str_val = str(val) if not pd.isna(val) else ''
+                    # Vérifie si la clé est vide ou contient des parties vides
+                    if str_val.strip() == '' or all(p.strip() == '' for p in str_val.split('||')):
+                        # Clé vide → identifiant unique (jamais égal à une autre ligne)
+                        result.append(f"__EMPTY_{idx}_{id(val)}__")
+                    else:
+                        result.append(val)
+                return pd.Series(result, index=series.index)
+            
+            self.file1_data['_composite_key'] = handle_empty_key(self.file1_data['_composite_key'])
+            self.file2_data['_composite_key'] = handle_empty_key(self.file2_data['_composite_key'])
+            
             # Utiliser les clés composites pour la comparaison
             refs1 = self.file1_data['_composite_key']
             refs2 = self.file2_data['_composite_key']
@@ -125,13 +143,13 @@ class Reconciliator:
                 file1_agg = self.file1_data.groupby('_composite_key').agg({
                     self.amount_col1: 'sum',
                     **{col: 'first' for col in self.file1_data.columns 
-                       if col not in [self.amount_col1, '_composite_key']}
+                    if col not in [self.amount_col1, '_composite_key']}
                 }).reset_index()
                 
                 file2_agg = self.file2_data.groupby('_composite_key').agg({
                     self.amount_col2: 'sum',
                     **{col: 'first' for col in self.file2_data.columns 
-                       if col not in [self.amount_col2, '_composite_key']}
+                    if col not in [self.amount_col2, '_composite_key']}
                 }).reset_index()
                 
                 refs1 = file1_agg['_composite_key']
@@ -201,7 +219,7 @@ class Reconciliator:
                         extra_f2 = working_df2[working_df2['_composite_key'] == key].index[pairs_count:]
                         missing_indices_f2.extend(extra_f2.tolist())
                 
-                # Les références uniquement dans un fichier
+                # Les références uniquement dans un fichier (y compris les clés vides uniques)
                 for key in set1 - set2:
                     missing_f1 = working_df1[working_df1['_composite_key'] == key].index
                     missing_indices_f1.extend(missing_f1.tolist())
