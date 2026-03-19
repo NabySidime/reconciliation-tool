@@ -243,7 +243,7 @@ Cliquez sur **"🔄 Réinitialisation"** pour tout effacer et recommencer avec d
 | Scénario | Configuration recommandée |
 |----------|--------------------------|
 | **Réconciliation bancaire** | Clé : `Numéro_transaction` + `Date`<br>Montant : `Montant` |
-| **Paiements échelonnés** | Clé : `ID_Client` + `Référence_Facture`<br>Montant : `Montant`<br>Mode : Agrégation |
+| **Paiements échelonnés** | Clé : `ID_Client` + `Référence_Facture`<br>Montant : `Montant` |
 | **Contrôle de caisse** | Clé : `Numéro_bon` + `Date` + `Caisse`<br>Montant : `Total_TTC` |
 | **Suivi des remboursements** | Clé : `Numéro_dossier` + `Date_remboursement`<br>Montant : `Montant_remboursé` |
 
