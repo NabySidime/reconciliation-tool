@@ -21,7 +21,7 @@ Développé en Python avec PySide6 pour l'interface graphique et pandas pour le 
 
 ---
 
-## Architecture du Projet
+Architecture du Projet
 
 ```
 reconciliation_app/
